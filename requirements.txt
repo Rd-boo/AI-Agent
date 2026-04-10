@@ -1,0 +1,6 @@
+langgraph              # The "skeleton" for your agent logic
+langchain-community    # For pre-built tools (web search, calculator, etc.)
+chromadb               # The long-term memory brain
+groq                   # To use Groq as the brain
+python-dotenv          # To keep your API keys safe
+mcp		               # To link the mind with the body

@@ -1,0 +1,17 @@
+.vscode/
+# Virtual environments
+venv/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Large data or logs
+data/
+logs/
+
+# Ignore some files
+general.txt
+db.py
