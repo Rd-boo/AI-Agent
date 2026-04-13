@@ -15,3 +15,4 @@ logs/
 # Ignore some files
 general.txt
 db.py
+check.py

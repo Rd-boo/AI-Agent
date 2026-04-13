@@ -1,67 +1,158 @@
 import os
-from typing import Annotated, TypedDict
+import json
+import requests
 from dotenv import load_dotenv
-from langchain_core.runnables import RunnableConfig
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-
-# 1. IMPORT MEMORY SAVER
-from langgraph.checkpoint.memory import MemorySaver
+from groq import Groq
 
 load_dotenv()
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    max_retries=3,  # It will automatically wait and try again up to 3 times
-)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+def instraction() -> str:
+    return ("""
+    You are a helpful agent, answer the users with the best u can based on your knowledge.
+    Use the provided tools *prayer_times* and *weather_data* when needed.
+    For prayer time just display {'Fajr', 'Duhr', 'Asr', 'Maghrib', 'Isha'} with the timing HH:MM. 
+    For weather use only {'weathed_data'} tool and just display the temperature and the humidity of the city. 
+    Never add responses that you're not asked for.
+    Format the results of {'prayer_times', 'weather_data'} to display the information in a clear and readable structure such as:
+        - Infos1
+        - Infos2
+        ...
+    For other responses make a clear text providing the necessary informations.
+    """)
 
-class State(TypedDict):
-    messages: Annotated[list, add_messages]
+def prayer_times(city: str) -> dict:
+    
+    # Using Aladhan API to fetch actual prayer times
+    url = f"https://api.aladhan.com/v1/timingsByAddress?address={city}"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data['data']['timings']
+    except Exception as e:
+        return {"Error": str(e)}
 
+def weather_data(city: str) -> dict:
+    
+    # Using Weather API to fetch actual weather data
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={os.getenv('OPENWEATHER_API_KEY')}&units=metric"      
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data['main']
+    except Exception as e:
+        return {"Error": str(e)}
 
-def chatbot(state: State):
-    response = llm.invoke(state["messages"])
-    return {"messages": [response]}
+available_functions = {
+    "prayer_times": prayer_times,
+    "weather_data": weather_data,
+}
 
+def start_chat():
+    print("--- Groq Chat Initialized ---")
 
-workflow = StateGraph(State)
-workflow.add_node("chatbot", chatbot)
-workflow.add_edge(START, "chatbot")
-workflow.add_edge("chatbot", END)
-
-# 2. INITIALIZE MEMORY
-memory = MemorySaver()
-
-# 3. COMPILE WITH CHECKPOINTER
-app = workflow.compile(checkpointer=memory)
-
-
-def run_chat():
-    print("--- Agent IA Active (Type 'quit' to stop) ---")
-
-    # 4. DEFINE A THREAD ID
-    # This acts as the session ID. LangGraph will automatically save
-    # and load the state for this specific thread.
-    config: RunnableConfig = {"configurable": {"thread_id": "tool_session"}}
+    # Initialize conversation history 
+    memory_history = [
+        {
+            "role": "system",
+            "content": instraction()
+        }
+    ]
 
     while True:
         user_input = input("You: ")
-        if user_input.lower() in ["quit", "exit"]:
+
+        if user_input.lower() in ["quit", "exit", "stop"]:
+            print("Chat ended.")
             break
 
-        # 5. PASS THE CONFIG TO THE STREAM
-        events = app.stream(
-            {"messages": [("user", user_input)]}, config=config, stream_mode="values"
-        )
+         # Describe the tool to the LLM (The "Manual")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "prayer_times",
+                    "description": "Get the prayer times for a specific city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {
+                                "type": "string",
+                                "description": "The name of the city",
+                            }
+                        },
+                        "required": ["city"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "weather_data",
+                    "description": "Get the weather times for a specific city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {
+                                "type": "string",
+                                "description": "The name of the city",
+                            }
+                        },
+                        "required": ["city"],
+                    },
+                },
+            },
+        ]
+        try:
+            # Add the user's message to the history
+            memory_history.append({"role": "user", "content": user_input})
 
-        for event in events:
-            if "messages" in event:
-                last_message = event["messages"][-1]
-                # Only print if it's the AI's turn, otherwise it echoes the user input
-                if hasattr(last_message, "content") and last_message.type == "ai":
-                    print(f"Agent: {last_message.content}")
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=memory_history,
+                temperature=0.7,
+                tools=tools,
+                tool_choice="auto",
+            )
+            
+            response_message = completion.choices[0].message
+            # Append the assistant's message (which might contain tool calls) to history
+            memory_history.append(response_message)
+            
+            tool_calls = getattr(response_message, 'tool_calls', None)  # Fetches an attribute from an object by name as a string.
+            
+            if tool_calls:
+                for tool_call in tool_calls:
+                    function_name = tool_call.function.name
+                    function_args = json.loads(tool_call.function.arguments)
+                    
+                    if function_name in available_functions:
+                        print(f"\n[*] Calling tool {function_name} with arguments: {function_args}")
+                        function_response = available_functions[function_name](city=function_args.get("city"))
+                        memory_history.append(
+                            {
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": function_name,
+                                "content": json.dumps(function_response),
+                            }
+                        )
+                
+                # Get the final response after applying tool results
+                second_response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=memory_history,
+                )
+                print(f"\n{second_response.choices[0].message.content}\n")
+            else:
+                print(f"\n{response_message.content}\n")
+
+        except Exception as e:
+            print(f"Error: {e}")
 
 
 if __name__ == "__main__":
-    run_chat()
+    start_chat()
