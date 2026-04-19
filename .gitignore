@@ -14,5 +14,5 @@ logs/
 
 # Ignore some files
 general.txt
+memory_db.py
 db.py
-check.py
